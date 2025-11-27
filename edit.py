@@ -42,7 +42,7 @@ print("Using HF_CACHE:", HF_CACHE)
 print("HF_TOKEN is set:", HF_TOKEN is not None)
 
 INPUT_FOLDER  = "inputs"
-OUTPUT_FOLDER = "outputs"
+OUTPUT_FOLDER = "tung_ga"
 
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -241,9 +241,9 @@ def get_edit_commands(critique, base64_img):
 # PROCESS REVIEWER (ĐÃ SỬA)
 # ===========================================================
 
-def process_reviewer(reviewer_id):
+def process_reviewer():
 
-    file_path = f"D:/python/paper/photo-critique-action/reviewer/reviewer_{reviewer_id}.json"
+    file_path = f"dataset.json"
     if not os.path.exists(file_path):
         print(f"Reviewer file not found: {file_path}")
         return
@@ -251,28 +251,18 @@ def process_reviewer(reviewer_id):
     with open(file_path, "r", encoding="utf-8") as f:
         data_list = json.load(f)
 
-    print(f"Processing reviewer {reviewer_id} with {len(data_list)} items")
+    # Tất cả ảnh sẽ lưu vào 1 folder duy nhất
+    output_dir = OUTPUT_FOLDER
 
-    # Giữ nguyên thư mục đầu ra như cũ
-    output_dir = f"{OUTPUT_FOLDER}/reviewer_{reviewer_id}"
-    os.makedirs(output_dir, exist_ok=True)
-
-    for entry in data_list[:1]:
+    for entry in data_list:
 
         post_id = entry.get("Post_ID")
         critique = entry.get("Critique")
         image_url = entry.get("Image_URL")
-        status = entry.get("Status", "").lower()
+        print(f"\nProcessing {post_id} ...")
+        start_time = time.time()
 
-        if status == "pending":
-            print(f"Skipping {post_id}: pending status")
-            continue
-
-        print(f"Processing {post_id}")
-
-        # ... (các bước tải ảnh, encode, và gọi GPT-4o giữ nguyên) ...
-
-        # download image
+        # ==== tải ảnh
         input_path = f"{INPUT_FOLDER}/0.png"
         if not download_and_save_image(image_url, input_path):
             print(f"Skipping {post_id}: image download failed")
@@ -283,50 +273,50 @@ def process_reviewer(reviewer_id):
             print(f"Skipping {post_id}: encode failed")
             continue
 
-        # get edit steps
+        # ==== GPT tạo command
         commands = get_edit_commands(critique, b64_img)
         if commands is None:
             print(f"Skipping {post_id}: GPT returned invalid commands")
             continue
 
-        # build agent sequence
+        # ==== build agent sequence
         text = "A detailed photo"
         text_bg = "A detailed photo"
-
         seq_args = command_parse(commands, text, text_bg)
-        
-        # TẠO TÊN FILE MỚI theo định dạng bạn yêu cầu
-        new_filename = f"{post_id}_output_gen_artist_reviewer_{reviewer_id}.png"
 
-        # add final SR
+        # OUTPUT FILE (yêu cầu của bạn)
+        output_path = f"{output_dir}/{post_id}_output_genartist.png"
+
         seq_args.append({
             "tool": "superresolution_SDXL",
             "input": {"image": f"{INPUT_FOLDER}/{len(seq_args)-1}.png"},
-            # SỬA ĐỔI: Sử dụng tên file mới đã tạo
-            "output": f"{output_dir}/{new_filename}" 
+            "output": output_path
         })
 
         print(f"Running {len(seq_args)} steps...")
 
-        # EXECUTE
+        # ==== chạy từng bước
         for step in seq_args:
             json.dump(step, open("input.json", "w"))
             tool = step["tool"]
 
             if tool in ["object_addition_anydoor", "segmentation", "detection"]:
                 os.system("python agent_tool_aux.py --json_out True")
-
             elif tool in ["addition_anydoor", "replace_anydoor", "remove",
                           "instruction", "attribute_diffedit"]:
                 os.system("python agent_tool_edit.py --json_out True")
-
             elif tool in ["text_to_image_SDXL", "image_to_image_SD2",
                           "layout_to_image_LMD", "layout_to_image_BoxDiff",
                           "superresolution_SDXL"]:
                 os.system("python agent_tool_generate.py --json_out True")
 
-        # Cập nhật thông báo hoàn thành
-        print(f"Done: {output_dir}/{new_filename}")
+        # tính thời gian
+        end_time = time.time()
+        elapsed = end_time - start_time
+
+        print(f"Done: {output_path}")
+        print(f"Edit time: {elapsed:.2f} seconds")
+
 
 
 # ===========================================================
