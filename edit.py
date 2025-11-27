@@ -7,9 +7,15 @@ from agent_tool_aux import main_aux
 from agent_tool_edit import main_edit
 from agent_tool_generate import main_generate
 from agent_tool import command_parse
+import time
+import re
+from dotenv import load_dotenv
+from PIL import Image
+import io 
+load_dotenv()
 
 # ============================
-#  CONFIG (FILL THESE)
+# CONFIG
 # ============================
 
 AZURE_OPENAI_KEY      = os.getenv("AZURE_OPENAI_KEY")
@@ -28,14 +34,23 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 # ===========================================================
 
 def encode_image(image_path):
+    """Return a compressed thumbnail JPEG as base64 string to keep payloads small."""
     if not os.path.exists(image_path):
         return None
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+    try:
+        with Image.open(image_path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((256, 256))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=40)
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        print(f"encode_image error: {e}")
+        return None
 
 
 # ===========================================================
-# DOWNLOADING IMAGE
+# DOWNLOAD IMAGE
 # ===========================================================
 
 def download_and_save_image(url, save_path):
@@ -54,75 +69,52 @@ def download_and_save_image(url, save_path):
         img = cv2.resize(img, (512, 512))
         cv2.imwrite(save_path, img)
         return True
+
     except Exception as e:
         print(f"Download image error: {e}")
         return False
 
-EDITING_PROMPT = """
-Your task is to convert the CRITIQUE into a sequence of image editing commands.
-You MUST return a valid JSON array. 
-Every element MUST be a JSON object. 
-Do NOT return Python lists. 
-Do NOT return single quotes. 
-Do NOT return comments. 
-Do NOT return explanations. 
-Return ONLY a JSON array. 
 
--------------------------------------------------------------------------------
-AVAILABLE TOOLS (choose the most appropriate):
+# ===========================================================
+# EDITING PROMPT — 1 LINE, SAFEST FOR AZURE
+# ===========================================================
 
-1) instruction_editing_MagicBrush  
-{"tool": "instruction_editing_MagicBrush",
- "input": {"image": "input.png", "text": "<instruction>"} }
+EDITING_PROMPT = (
+    "Your task is to convert the CRITIQUE into a JSON array of image-editing commands. "
+    "Each command MUST be a valid JSON object. Never use Python syntax. Never use single quotes. "
+    "Allowed tools: "
+    "{\"tool\":\"instruction_editing_MagicBrush\",\"input\":{\"image\":\"input.png\",\"text\":\"<instruction>\"}}, "
+    "{\"tool\":\"remove_lama\",\"input\":{\"image\":\"input.png\",\"object\":\"<object>\"}}, "
+    "{\"tool\":\"addition_anydoor\",\"input\":{\"image\":\"input.png\",\"object\":\"<object>\",\"mask\":\"TBG\"}}, "
+    "{\"tool\":\"replace_anydoor\",\"input\":{\"image\":\"input.png\",\"object\":\"<new object>\",\"mask\":\"TBG\"}}, "
+    "{\"tool\":\"attribute_diffedit\",\"input\":{\"image\":\"input.png\",\"object\":\"<object>\",\"attr\":\"<new attribute>\"}}, "
+    "{\"tool\":\"drag_dragondiffusion\",\"input\":{\"image\":\"input.png\",\"p1\":\"TBG\",\"p2\":\"TBG\"}}. "
+    "RULES: Always return ONLY a JSON array. No comments. No natural language. No markdown."
+)
 
-2) remove_lama  
-{"tool": "remove_lama",
- "input": {"image": "input.png", "object": "<object>"} }
 
-3) addition_anydoor  
-{"tool": "addition_anydoor",
- "input": {"image": "input.png", "object": "<object>", "mask": "TBG"} }
-
-4) replace_anydoor  
-{"tool": "replace_anydoor",
- "input": {"image": "input.png", "object": "<new object>", "mask": "TBG"} }
-
-5) attribute_diffedit  
-{"tool": "attribute_diffedit",
- "input": {"image": "input.png", "object": "<object>", "attr": "<new attribute>"} }
-
-6) drag_dragondiffusion  
-{"tool": "drag_dragondiffusion",
- "input": {"image": "input.png", "p1": "TBG", "p2": "TBG"} }
-
--------------------------------------------------------------------------------
-
-RULES:
-- ALWAYS return a JSON array.
-- NEVER return Python.
-- NEVER return text outside the JSON.
-- NEVER use single quotes.
-- If no edit is needed: return [].
-
--------------------------------------------------------------------------------
-"""
-
+# ===========================================================
+# CALL AZURE GPT-4o
+# ===========================================================
 
 def get_edit_commands(critique, base64_img):
-    user_prompt = f"""
-{EDITING_PROMPT}
+    # CLEAN TEXT TO PREVENT AZURE ERRORS
+    clean_critique = critique.replace("\n", " ").replace("\r", " ").replace('"', "'").strip()
+    clean_b64 = base64_img.strip()
 
-CRITIQUE:
-{critique}
+    user_prompt = (
+        EDITING_PROMPT +
+        " CRITIQUE: " + clean_critique +
+        " IMAGE_BASE64: " + clean_b64 +
+        " RETURN ONLY A JSON ARRAY."
+    )
 
-IMAGE (base64):
-{base64_img}
-
-Return ONLY a JSON array.
-""".strip()
+    # Safety: avoid extremely large payloads
+    if len(user_prompt) > 200_000:
+        print(f"Error: composed prompt too large ({len(user_prompt)} chars). Abort to avoid 400.")
+        return None
 
     payload = {
-        "model": AZURE_OPENAI_DEPLOY,
         "messages": [
             {"role": "user", "content": user_prompt}
         ],
@@ -131,27 +123,88 @@ Return ONLY a JSON array.
     }
 
     try:
-        url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOY}/chat/completions?api-version={AZURE_OPENAI_VERSION}"
+        url = (
+            f"{AZURE_OPENAI_ENDPOINT.rstrip('/')}"
+            f"/openai/deployments/{AZURE_OPENAI_DEPLOY}/chat/completions?api-version={AZURE_OPENAI_VERSION}"
+        )
         headers = {
             "api-key": AZURE_OPENAI_KEY,
             "Content-Type": "application/json"
         }
 
-        r = requests.post(url, headers=headers, json=payload)
-        r.raise_for_status()
+        # Debug
+        print("Calling Azure OpenAI URL:", url)
+        print("Payload size (chars):", len(json.dumps(payload)))
 
-        raw = r.json()["choices"][0]["message"]["content"].strip()
+        # Retry loop (exponential backoff), honor Retry-After if provided
+        max_retries = 6
+        backoff = 1
+        r = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                r = requests.post(url, headers=headers, json=payload, timeout=60)
+            except Exception as e:
+                print(f"Request exception (attempt {attempt}): {e}")
+                if attempt == max_retries:
+                    print("Max retries reached for request exceptions.")
+                    return None
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+                continue
 
-        # PARSE JSON
+            if r.status_code == 200:
+                break
+
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = int(retry_after)
+                except Exception:
+                    wait = backoff
+                print(f"Azure returned 429 (attempt {attempt}/{max_retries}), retrying after {wait}s")
+                time.sleep(wait)
+                backoff = min(backoff * 2, 60)
+                continue
+
+            # other non-200 -> log body and abort
+            print("Azure returned status:", r.status_code)
+            print("Response body:", r.text)
+            return None
+
+        if r is None:
+            print("No response after retries.")
+            return None
+
+        # Try to get assistant content (safe)
         try:
-            commands = json.loads(raw)
-        except:
-            print("GPT returned invalid JSON. Raw:")
-            print(raw)
+            raw = r.json().get("choices", [])[0].get("message", {}).get("content", "").strip()
+        except Exception:
+            raw = r.text
+
+        # Extract JSON array if wrapped in fences or other text
+        def extract_json_array(text):
+            m = re.search(r"``[json\\s*(.*?)\\s*](http://_vscodecontentref_/3)``", text, re.DOTALL | re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            start = text.find("[")
+            end = text.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                return text[start:end+1]
+            return text
+
+        cleaned = extract_json_array(raw)
+
+        try:
+            commands = json.loads(cleaned)
+        except Exception:
+            print("GPT returned invalid JSON. Raw response:")
+            print(raw[:2000])
+            print("Cleaned attempt (first 2000 chars):")
+            print(cleaned[:2000])
             return None
 
         if not isinstance(commands, list):
-            print("GPT returned non-list structure:", commands)
+            print("GPT returned non-list structure:", type(commands), commands)
             return None
 
         return commands
@@ -166,7 +219,8 @@ Return ONLY a JSON array.
 # ===========================================================
 
 def process_reviewer(reviewer_id):
-    file_path = f"data/reviewer_{reviewer_id}.json"
+
+    file_path = f"D:/python/paper/photo-critique-action/reviewer/reviewer_{reviewer_id}.json"
     if not os.path.exists(file_path):
         print(f"Reviewer file not found: {file_path}")
         return
@@ -179,7 +233,8 @@ def process_reviewer(reviewer_id):
     output_dir = f"{OUTPUT_FOLDER}/reviewer_{reviewer_id}"
     os.makedirs(output_dir, exist_ok=True)
 
-    for entry in data_list:
+    for entry in data_list[:1]:
+
         post_id = entry.get("Post_ID")
         critique = entry.get("Critique")
         image_url = entry.get("Image_URL")
@@ -191,6 +246,7 @@ def process_reviewer(reviewer_id):
 
         print(f"Processing {post_id}")
 
+        # download image
         input_path = f"{INPUT_FOLDER}/0.png"
         if not download_and_save_image(image_url, input_path):
             print(f"Skipping {post_id}: image download failed")
@@ -201,17 +257,19 @@ def process_reviewer(reviewer_id):
             print(f"Skipping {post_id}: encode failed")
             continue
 
+        # get edit steps
         commands = get_edit_commands(critique, b64_img)
         if commands is None:
             print(f"Skipping {post_id}: GPT returned invalid commands")
             continue
 
-        # Build full sequence
+        # build agent sequence
         text = "A detailed photo"
         text_bg = "A detailed photo"
+
         seq_args = command_parse(commands, text, text_bg)
 
-        # add a final SR
+        # add final SR
         seq_args.append({
             "tool": "superresolution_SDXL",
             "input": {"image": f"{INPUT_FOLDER}/{len(seq_args)-1}.png"},
@@ -227,8 +285,11 @@ def process_reviewer(reviewer_id):
 
             if tool in ["object_addition_anydoor", "segmentation", "detection"]:
                 os.system("python agent_tool_aux.py --json_out True")
-            elif tool in ["addition_anydoor", "replace_anydoor", "remove", "instruction", "attribute_diffedit"]:
+
+            elif tool in ["addition_anydoor", "replace_anydoor", "remove",
+                          "instruction", "attribute_diffedit"]:
                 os.system("python agent_tool_edit.py --json_out True")
+
             elif tool in ["text_to_image_SDXL", "image_to_image_SD2",
                           "layout_to_image_LMD", "layout_to_image_BoxDiff",
                           "superresolution_SDXL"]:
