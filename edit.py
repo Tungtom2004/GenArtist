@@ -23,11 +23,30 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_VERSION  = os.getenv("AZURE_OPENAI_VERSION", "2024-10-21")
 AZURE_OPENAI_DEPLOY   = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_CACHE = "./hf_cache"
+
+# Inject vào môi trường cho Diffusers
+os.environ["HF_HOME"] = HF_CACHE
+os.environ["HUGGINGFACE_HUB_CACHE"] = HF_CACHE
+os.environ["HUGGINGFACE_HUB_TOKEN"] = HF_TOKEN or ""
+os.environ["HF_TOKEN"] = HF_TOKEN or ""
+
+# Cho phép tải các model yêu cầu license (như SDXL)
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
+os.environ["DIFFUSERS_OFFLINE"] = "0"
+
+# Kiểm tra
+print("Using HF_CACHE:", HF_CACHE)
+print("HF_TOKEN is set:", HF_TOKEN is not None)
+
 INPUT_FOLDER  = "inputs"
 OUTPUT_FOLDER = "outputs"
 
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(HF_CACHE, exist_ok=True)
 
 # ===========================================================
 # ENCODING IMAGE
@@ -218,6 +237,10 @@ def get_edit_commands(critique, base64_img):
 # PROCESS REVIEWER
 # ===========================================================
 
+# ===========================================================
+# PROCESS REVIEWER (ĐÃ SỬA)
+# ===========================================================
+
 def process_reviewer(reviewer_id):
 
     file_path = f"D:/python/paper/photo-critique-action/reviewer/reviewer_{reviewer_id}.json"
@@ -230,6 +253,7 @@ def process_reviewer(reviewer_id):
 
     print(f"Processing reviewer {reviewer_id} with {len(data_list)} items")
 
+    # Giữ nguyên thư mục đầu ra như cũ
     output_dir = f"{OUTPUT_FOLDER}/reviewer_{reviewer_id}"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -245,6 +269,8 @@ def process_reviewer(reviewer_id):
             continue
 
         print(f"Processing {post_id}")
+
+        # ... (các bước tải ảnh, encode, và gọi GPT-4o giữ nguyên) ...
 
         # download image
         input_path = f"{INPUT_FOLDER}/0.png"
@@ -268,12 +294,16 @@ def process_reviewer(reviewer_id):
         text_bg = "A detailed photo"
 
         seq_args = command_parse(commands, text, text_bg)
+        
+        # TẠO TÊN FILE MỚI theo định dạng bạn yêu cầu
+        new_filename = f"{post_id}_output_gen_artist_reviewer_{reviewer_id}.png"
 
         # add final SR
         seq_args.append({
             "tool": "superresolution_SDXL",
             "input": {"image": f"{INPUT_FOLDER}/{len(seq_args)-1}.png"},
-            "output": f"{output_dir}/{post_id}_final.png"
+            # SỬA ĐỔI: Sử dụng tên file mới đã tạo
+            "output": f"{output_dir}/{new_filename}" 
         })
 
         print(f"Running {len(seq_args)} steps...")
@@ -295,7 +325,8 @@ def process_reviewer(reviewer_id):
                           "superresolution_SDXL"]:
                 os.system("python agent_tool_generate.py --json_out True")
 
-        print(f"Done: {output_dir}/{post_id}_final.png")
+        # Cập nhật thông báo hoàn thành
+        print(f"Done: {output_dir}/{new_filename}")
 
 
 # ===========================================================
